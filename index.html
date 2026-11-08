@@ -5656,6 +5656,7 @@ function computeWorldSpawn(){
     }
     if(land < 12) score -= 20;
     score += same * .5;
+    if(!spawnSpotClear(x,y)) continue;        // 出生点不能压在树/石头这类实心物件上
     if(score >= 6) cand.push({x:x+.5, y:y+.5, score, t});
   }
   if(cand.length){
@@ -5670,7 +5671,7 @@ function computeWorldSpawn(){
     for(let a=0; a<24; a++){
       const ang=a*.2618 + rad*.013, x=Math.round(Math.cos(ang)*rad), y=Math.round(Math.sin(ang)*rad);
       const t=genTile(x,y);
-      if(!BAD.includes(t) && !lavaZone(x,y)) return {x:x+.5, y:y+.5};
+      if(!BAD.includes(t) && !lavaZone(x,y) && spawnSpotClear(x,y)) return {x:x+.5, y:y+.5};
     }
   }
   return {x:.5, y:.5, t:T.GRASS};
@@ -5678,6 +5679,47 @@ function computeWorldSpawn(){
 function findSpawn(){
   worldSpawn = computeWorldSpawn();
   player.x = worldSpawn.x; player.y = worldSpawn.y;
+}
+/* ---- 出生 / 卡死防护: 落点必须是站得住的空地, 不能塞进树、石头、矿石里 ---- */
+function objSolidAtTx(tx, ty){          // 该格是不是有实心物件(区块已生成就用区块, 没有就用生成器现算)
+  const c = chunkAt(tx, ty, false);
+  if(c && c.cx===Math.floor(tx/CHUNK) && c.cy===Math.floor(ty/CHUNK)){
+    const ob = c.objMap.get(tx+','+ty);
+    return !!(ob && OBJ[ob.type] && OBJ[ob.type].solid);
+  }
+  const t = genTile(tx, ty), ob = genObj(tx, ty, t);
+  return !!(ob && OBJ[ob.type] && OBJ[ob.type].solid);
+}
+function spawnSpotClear(x, y){          // 本格空 + 九宫格里至少留出四个方向可走
+  if(objSolidAtTx(x, y)) return false;
+  let free = 0;
+  for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++) if(dx||dy) free += objSolidAtTx(x+dx, y+dy) ? 0 : 1;
+  return free >= 4;
+}
+function freeTileNear(x, y, maxR){      // 一圈圈找最近的可站空地
+  x = Math.floor(x); y = Math.floor(y);
+  for(let r=0;r<=maxR;r++){
+    for(let dy=-r;dy<=r;dy++) for(let dx=-r;dx<=r;dx++){
+      if(Math.max(Math.abs(dx),Math.abs(dy))!==r) continue;
+      if(canStand(x+dx+.5, y+dy+.5, .32, true)) return {x:x+dx+.5, y:y+dy+.5};
+    }
+  }
+  return null;
+}
+function playerEmbedded(){              // 脚下这一格被实心物件占住了 = 卡在树/石头里
+  const tx = Math.floor(player.x), ty = Math.floor(player.y);
+  const c = chunkAt(tx, ty, false); if(!c) return false;
+  const ob = c.objMap.get(tx+','+ty);
+  return !!(ob && OBJ[ob.type] && OBJ[ob.type].solid);
+}
+function unstuckPlayer(silent){         // 卡住时自动挪到最近的空地
+  const spot = freeTileNear(player.x, player.y, 26) || freeTileNear(player.x, player.y, 90);
+  if(!spot) return false;
+  player.x = spot.x; player.y = spot.y;
+  player._stuckT = 0;
+  updateChunks(Math.floor(player.x/CHUNK), Math.floor(player.y/CHUNK));
+  if(!silent) showTip('🧱 你被方块卡住了,已自动挪到旁边的空地');
+  return true;
 }
 
 /* ---------------- 输入: 键盘 + 摇杆 ---------------- */
@@ -9706,6 +9748,13 @@ function update(dt){
       }
     } else player.animT=0;
     if(!player.flying) boatFollow();   // 站在船上: 船跟人走
+    /* 卡死自救: 出生/读档/传送偶尔会落在树或石头里, 站定被占住超过半秒就自动挪出来 */
+    if(!player.dead && !player.onBoat){
+      if(playerEmbedded()){
+        player._stuckT = (player._stuckT||0) + dt;
+        if(player._stuckT > .5) unstuckPlayer();
+      } else player._stuckT = 0;
+    }
     /* 坐标兜底: 万一数值算坏(NaN/Infinity)会把区块/镜头一起带崩 → 立刻拉回出生点 */
     if(!Number.isFinite(player.x) || !Number.isFinite(player.y)){
       const sp0 = player.spawn || worldSpawn || {x:8.5, y:8.5};
@@ -12536,6 +12585,7 @@ function startWorld(slot, data, seed, noSave){
   autoMerge();                       // 读档/新世界都整理一次背包(同类合并)
   refreshAllUI();
   updateChunks(Math.floor(player.x/CHUNK), Math.floor(player.y/CHUNK));
+  if(playerEmbedded()) unstuckPlayer(true);   // 读档/出生落进树石头里: 进场就先挪出来
   if(eraNow().id !== 'drought') repopulateLoadedChunks();
   miniLast = -9; updateMini();                 // 换世界/读档: 小地图立即对准新位置   // 读档后补齐被干旱清空/后加载的地块
   showTip(data ? `欢迎回来! 存档槽${slot+1} · 种子${WORLD_SEED} · 出生点旁的指引者能接任务` : `新世界已生成! 种子${WORLD_SEED} · 出生点旁的指引者能接任务(把种子发给朋友,TA建世界时填同一串,地形一模一样)`);
